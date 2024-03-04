@@ -1,20 +1,41 @@
 # MetaVoice-1B
 
+
+<p>
+<a href="https://ttsdemo.themetavoice.xyz/"><b>Playground</b></a> | <a target="_blank" style="display: inline-block; vertical-align: middle" href="https://colab.research.google.com/github/metavoiceio/metavoice-src/blob/main/colab_demo.ipynb">
+  <img src="https://colab.research.google.com/assets/colab-badge.svg" alt="Open In Colab"/>
+</a> 
+</p>
+
 MetaVoice-1B is a 1.2B parameter base model trained on 100K hours of speech for TTS (text-to-speech). It has been built with the following priorities:
-* **Emotional speech rhythm and tone** in English. No hallucinations.
+* **Emotional speech rhythm and tone** in English.
 * **Zero-shot cloning for American & British voices**, with 30s reference audio.
 * Support for (cross-lingual) **voice cloning with finetuning**.
   * We have had success with as little as 1 minute training data for Indian speakers.
-* Support for **long-form synthesis**.
+* Synthesis of **arbitrary length text**
 
 We’re releasing MetaVoice-1B under the Apache 2.0 license, *it can be used without restrictions*.
 
-Try out the [demo](https://ttsdemo.themetavoice.xyz/)!
+
+## Quickstart - tl;dr
+
+Web UI
+```bash
+docker-compose up -d ui && docker-compose ps && docker-compose logs -f
+```
+
+Server
+```bash
+docker-compose up -d server && docker-compose ps && docker-compose logs -f
+```
 
 ## Installation  
 
-**Pre-requisites:** Python >=3.10,<3.12; GPU with >=24GB RAM.
+**Pre-requisites:**
+- GPU VRAM >=12GB
+- Python >=3.10,<3.12
 
+**Environment setup**
 ```bash
 # install ffmpeg
 wget https://johnvansickle.com/ffmpeg/builds/ffmpeg-git-amd64-static.tar.xz
@@ -24,30 +45,41 @@ tar xvf ffmpeg-git-amd64-static.tar.xz
 sudo mv ffmpeg-git-*-static/ffprobe ffmpeg-git-*-static/ffmpeg /usr/local/bin/
 rm -rf ffmpeg-git-*
 
+# install rust if not installed (ensure you've restarted your terminal after installation)
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+
 pip install -r requirements.txt
-
-# Works only on lasest NVidia GPUs. If you have a different GPU, do not install this.
-pip install flash-attn
-
+pip install --upgrade torch torchaudio  # for torch.compile improvements
 pip install -e .
 ```
 
 ## Usage
-1. Download it and use it anywhere (including locally) with our [reference implementation](/fam/llm/sample.py),
+1. Download it and use it anywhere (including locally) with our [reference implementation](/fam/llm/fast_inference.py)
 ```bash
-python fam/llm/sample.py --huggingface_repo_id="metavoiceio/metavoice-1B-v0.1" --spk_cond_path="assets/bria.mp3"
-```
+python -i fam/llm/fast_inference.py 
 
-2. Deploy it on any cloud (AWS/GCP/Azure), using our [inference server](/fam/llm/serving.py)
+# Run e.g. of API usage within the interactive python session
+tts.synthesise(text="This is a demo of text to speech by MetaVoice-1B, an open-source foundational audio model.", spk_ref_path="assets/bria.mp3")
+```
+> Note: The script takes 30-90s to startup (depending on hardware). This is because we torch.compile the model for fast inference.
+
+> On Ampere, Ada-Lovelace, and Hopper architecture GPUs, once compiled, the synthesise() API runs faster than real-time, with a Real-Time Factor (RTF) < 1.0.
+
+2. Deploy it on any cloud (AWS/GCP/Azure), using our [inference server](serving.py) or [web UI](app.py)
 ```bash
-python fam/llm/serving.py --huggingface_repo_id="metavoiceio/metavoice-1B-v0.1"
+python serving.py
+python app.py 
 ```
 
 3. Use it via [Hugging Face](https://huggingface.co/metavoiceio)
+4. [Google Collab Demo](https://colab.research.google.com/github/metavoiceio/metavoice-src/blob/main/colab_demo.ipynb)
 
-## Soon
-- Long form TTS
-- Fine-tuning code
+
+## Upcoming
+- [x] Faster inference ⚡
+- [ ] Fine-tuning code
+- [ ] Synthesis of arbitrary length text
+
 
 ## Architecture
 We predict EnCodec tokens from text, and speaker information. This is then diffused up to the waveform level, with post-processing applied to clean up the audio.
@@ -71,3 +103,11 @@ The model supports:
 
 ## Acknowledgements
 We are grateful to Together.ai for their 24/7 help in marshalling our cluster. We thank the teams of AWS, GCP & Hugging Face for support with their cloud platforms.
+
+- [A Défossez et. al.](https://arxiv.org/abs/2210.13438) for Encodec.
+- [RS Roman et. al.](https://arxiv.org/abs/2308.02560) for Multiband Diffusion.
+- [@liusongxiang](https://github.com/liusongxiang/ppg-vc/blob/main/speaker_encoder/inference.py) for speaker encoder implementation.
+- [@karpathy](https://github.com/karpathy/nanoGPT) for NanoGPT which our inference implementation is based on.
+- [@Rikorose](https://github.com/Rikorose) for DeepFilterNet.
+
+Apologies in advance if we've missed anyone out. Please let us know if we have.

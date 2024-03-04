@@ -5,26 +5,18 @@ import subprocess
 import tempfile
 import warnings
 from pathlib import Path
-from typing import Literal, Optional, Tuple
+from typing import Optional
 
 import fastapi
 import fastapi.middleware.cors
-import torch
 import tyro
 import uvicorn
 from attr import dataclass
 from fastapi import Request
 from fastapi.responses import Response
-from huggingface_hub import snapshot_download
 
-from fam.llm.sample import (
-    InferenceConfig,
-    Model,
-    build_models,
-    get_first_stage_path,
-    get_second_stage_path,
-    sample_utterance,
-)
+from fam.llm.fast_inference import TTS
+from fam.llm.utils import check_audio_file
 
 logger = logging.getLogger(__name__)
 
@@ -35,17 +27,11 @@ app = fastapi.FastAPI()
 
 @dataclass
 class ServingConfig:
-    huggingface_repo_id: str
+    huggingface_repo_id: str = "metavoiceio/metavoice-1B-v0.1"
     """Absolute path to the model directory."""
-
-    max_new_tokens: int = 864 * 2
-    """Maximum number of new tokens to generate from the first stage model."""
 
     temperature: float = 1.0
     """Temperature for sampling applied to both models."""
-
-    top_k: int = 200
-    """Top k for sampling applied to both models."""
 
     seed: int = 1337
     """Random seed for sampling."""
@@ -68,11 +54,8 @@ class ServingConfig:
 
 # Singleton
 class _GlobalState:
-    spkemb_model: torch.nn.Module
-    first_stage_model: Model
-    second_stage_model: Model
     config: ServingConfig
-    enhancer: object
+    tts: TTS
 
 
 GlobalState = _GlobalState()
@@ -81,10 +64,15 @@ GlobalState = _GlobalState()
 @dataclass(frozen=True)
 class TTSRequest:
     text: str
-    guidance: Optional[Tuple[float, float]] = (3.0, 1.0)
-    top_p: Optional[float] = 0.95
     speaker_ref_path: Optional[str] = None
+    guidance: float = 3.0
+    top_p: float = 0.95
     top_k: Optional[int] = None
+
+
+@app.get("/health")
+async def health_check():
+    return {"status": "ok"}
 
 
 @app.post("/tts", response_class=Response)
@@ -101,26 +89,22 @@ async def text_to_speech(req: Request):
         with tempfile.NamedTemporaryFile(suffix=".wav") as wav_tmp:
             if tts_req.speaker_ref_path is None:
                 wav_path = _convert_audiodata_to_wav_path(audiodata, wav_tmp)
+                check_audio_file(wav_path)
             else:
+                # TODO: fix
                 wav_path = tts_req.speaker_ref_path
+
             if wav_path is None:
                 warnings.warn("Running without speaker reference")
                 assert tts_req.guidance is None
-            wav_out_path = sample_utterance(
-                tts_req.text,
-                wav_path,
-                GlobalState.spkemb_model,
-                GlobalState.first_stage_model,
-                GlobalState.second_stage_model,
-                enhancer=GlobalState.enhancer,
-                first_stage_ckpt_path=None,
-                second_stage_ckpt_path=None,
-                guidance_scale=tts_req.guidance,
-                max_new_tokens=GlobalState.config.max_new_tokens,
-                temperature=GlobalState.config.temperature,
-                top_k=tts_req.top_k,
+
+            wav_out_path = GlobalState.tts.synthesise(
+                text=tts_req.text,
+                spk_ref_path=wav_path,
                 top_p=tts_req.top_p,
+                guidance_scale=tts_req.guidance,
             )
+
         with open(wav_out_path, "rb") as f:
             return Response(content=f.read(), media_type="audio/wav")
     except Exception as e:
@@ -150,15 +134,14 @@ def _convert_audiodata_to_wav_path(audiodata, wav_tmp):
 
 
 if __name__ == "__main__":
-    # This has to be here to avoid some weird audiocraft shenaningans messing up matplotlib
-    from fam.llm.enhancers import get_enhancer
-
     for name in logging.root.manager.loggerDict:
         logger = logging.getLogger(name)
         logger.setLevel(logging.INFO)
     logging.root.setLevel(logging.INFO)
 
     GlobalState.config = tyro.cli(ServingConfig)
+    GlobalState.tts = TTS(seed=GlobalState.config.seed)
+
     app.add_middleware(
         fastapi.middleware.cors.CORSMiddleware,
         allow_origins=["*", f"http://localhost:{GlobalState.config.port}", "http://localhost:3000"],
@@ -189,7 +172,7 @@ if __name__ == "__main__":
     )
 
     spkemb, llm_stg1, llm_stg2 = build_models(
-        config1, config2, model_dir=model_dir, device=device, use_kv_cache=GlobalState.config.use_kv_cache
+        config1, config2, model_dir=model_dir, device=device, use_kv_cache=GlobalState.config.use_kv_cache #TODO: "flash_decoding"
     )
     GlobalState.spkemb_model = spkemb
     GlobalState.first_stage_model = llm_stg1
@@ -197,9 +180,10 @@ if __name__ == "__main__":
     GlobalState.enhancer = get_enhancer(GlobalState.config.enhancer)
 
     # start server
+
     uvicorn.run(
         app,
-        host="127.0.0.1",
+        host="0.0.0.0",
         port=GlobalState.config.port,
         log_level="info",
     )
