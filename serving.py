@@ -36,6 +36,19 @@ class ServingConfig:
     seed: int = 1337
     """Random seed for sampling."""
 
+    dtype: Literal["bfloat16", "float16", "float32", "tfloat32"] = "bfloat16"
+    """Data type to use for sampling."""
+
+    enhancer: Optional[Literal["df"]] = "df"
+    """Enhancer to use for post-processing."""
+
+    use_kv_cache: Optional[Literal["flash_decoding", "vanilla"]] = None
+    """Type of kv caching to use for inference: 1) [none] no kv caching, 2) [flash_decoding] use the
+    flash decoding kernel, 3) [vanilla] use flash attention 2 with hand implemented kv-cache."""
+
+    compile: bool = False
+    """Whether to compile the model using PyTorch 2.0."""
+
     port: int = 58003
 
 
@@ -136,6 +149,38 @@ if __name__ == "__main__":
         allow_methods=["*"],
         allow_headers=["*"],
     )
+
+    device = "cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu"
+    common_config = dict(
+        num_samples=1,
+        seed=1337,
+        device=device,
+        dtype=GlobalState.config.dtype,
+        compile=GlobalState.config.compile,
+        init_from="resume",
+        output_dir=tempfile.mkdtemp(),
+    )
+    model_dir = snapshot_download(repo_id=GlobalState.config.huggingface_repo_id)
+    config1 = InferenceConfig(
+        ckpt_path=get_first_stage_path(model_dir),
+        **common_config,
+    )
+
+    config2 = InferenceConfig(
+        ckpt_path=get_second_stage_path(model_dir),
+        **common_config,
+    )
+
+    spkemb, llm_stg1, llm_stg2 = build_models(
+        config1, config2, model_dir=model_dir, device=device, use_kv_cache=GlobalState.config.use_kv_cache #TODO: "flash_decoding"
+    )
+    GlobalState.spkemb_model = spkemb
+    GlobalState.first_stage_model = llm_stg1
+    GlobalState.second_stage_model = llm_stg2
+    GlobalState.enhancer = get_enhancer(GlobalState.config.enhancer)
+
+    # start server
+
     uvicorn.run(
         app,
         host="0.0.0.0",

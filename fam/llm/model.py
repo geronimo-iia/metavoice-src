@@ -42,7 +42,8 @@ class GPTConfig:
     rmsnorm_eps: Optional[float] = None  # only used for rmsnorm
     nonlinearity_type: str = "gelu"  # "gelu" or "swiglu"
     swiglu_multiple_of: Optional[int] = None  # MLP hidden layer (using SwiGLU) will be multiple of this
-    attn_kernel_type: Literal["torch_attn"] = "torch_attn"
+    # TODO: check default wil MPL
+    attn_kernel_type: Literal["fa2", "torch_attn", "hand"] = "fa2"
     kv_cache_enabled: bool = False  # whether to use key-value cache for attention
 
 
@@ -232,7 +233,8 @@ class GPT(nn.Module, NonCausalInferenceMixin, CausalInferenceMixin):
         tok_emb = torch.zeros((b, t, self.config.n_embd), device=device)
         # ends up swapping (B, num_hierarchies, t) tokens -> (B, t, c) embeddings.
         for i, wte in enumerate(self.transformer.wtes):
-            tok_emb += wte(idx[:, i, :])
+            idx_long = idx.long()
+            tok_emb += wte(idx_long[:, i, :])
         pos_emb = self.transformer.wpe(pos)  # position embeddings of shape (t, n_embd)
 
         spk_emb = 0.0

@@ -10,6 +10,7 @@ import pathlib
 import shutil
 import subprocess
 import tempfile
+import traceback
 import time
 from contextlib import nullcontext
 from dataclasses import dataclass
@@ -70,7 +71,9 @@ class Model:
         torch.cuda.manual_seed(config.seed)
         torch.backends.cuda.matmul.allow_tf32 = True if config.dtype != "float32" else False  # allow tf32 on matmul
         torch.backends.cudnn.allow_tf32 = True if config.dtype != "float32" else False  # allow tf32 on cudnn
-        device_type = "cuda" if "cuda" in config.device else "cpu"  # for later use in torch.autocast
+        self.device = (
+            "cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu"
+        )  # for later use in torch.autocast
         self.ptdtype = {
             "float32": torch.float32,
             "tfloat32": torch.float32,
@@ -78,7 +81,7 @@ class Model:
             "float16": torch.float16,
         }[config.dtype]
         self._ctx = (
-            nullcontext() if device_type == "cpu" else torch.amp.autocast(device_type=device_type, dtype=self.ptdtype)
+            nullcontext() if self.device != "cuda" else torch.amp.autocast(device_type=self.device, dtype=self.ptdtype)
         )
 
         self.use_bpe_tokenizer = False
@@ -102,7 +105,7 @@ class Model:
     def _init_model(self):
         if self.config.init_from == "resume":
             # init from a model saved in a specific directory
-            checkpoint = torch.load(self.config.ckpt_path, map_location=self.config.device)
+            checkpoint = torch.load(self.config.ckpt_path, map_location=self.device)
             self.vocab_sizes = checkpoint["model_args"]["vocab_sizes"]
 
             self.load_meta = False
@@ -138,7 +141,7 @@ class Model:
 
         # model
         self.model.eval()
-        self.model.to(self.config.device)
+        self.model.to(self.device)
 
         if self.config.compile:
             from einops._torch_specific import allow_ops_in_compiled_graph
@@ -180,7 +183,7 @@ class Model:
         seq_lens = []
         xs = []
         for i, encoded_text in enumerate(encoded_texts):
-            encoded_text = torch.tensor([encoded_text], dtype=torch.long, device=self.config.device)
+            encoded_text = torch.tensor([encoded_text], dtype=torch.long, device=self.device)
             # TODO: remove magic number
             xs.append(
                 torch.cat(
@@ -195,12 +198,12 @@ class Model:
         assert len(xs) == len(seq_lens)
 
         ## equalise the shapes in the batch. we can use torch.zeros as tokens > seq_lens will be masked out.
-        x = torch.zeros((len(encoded_texts), xs[0].shape[1], max_len), dtype=torch.long, device=self.config.device)
+        x = torch.zeros((len(encoded_texts), xs[0].shape[1], max_len), dtype=torch.long, device=self.device)
         for i, _xs in enumerate(xs):
             assert _xs.shape[-1] == seq_lens[i]
             x[i, :, : seq_lens[i]] = _xs
 
-        ## check that the input is correct
+        ## check that the input is correct
         for i in range(x.shape[0]):
             assert x[i, 0, : seq_lens[i]].tolist() == encoded_texts[i]
 
@@ -267,9 +270,7 @@ class Model:
         # TODO: same code is used during data prep. refactor
         padded_hierarchies_inputs = []
         for encoded_text, encodec_token in zip(encoded_texts, encodec_tokens):
-            x = torch.tensor(encoded_text, dtype=torch.long, device=self.config.device)[
-                None, None, ...
-            ]  # (b=1, c=1, t)
+            x = torch.tensor(encoded_text, dtype=torch.long, device=self.device)[None, None, ...]  # (b=1, c=1, t)
 
             # TODO: should only happen if decoder is encodecdeocder?
             assert encodec_token.shape[0] == 1
@@ -303,7 +304,7 @@ class Model:
             padded_hierarchies_inputs.append(padded_hierarchies_input)
 
         ## check that the input is correct
-        in_x = torch.tensor(padded_hierarchies_inputs, dtype=torch.long, device=self.config.device)
+        in_x = torch.tensor(padded_hierarchies_inputs, dtype=torch.long, device=self.device)
         assert in_x.shape[0] == speaker_embs.shape[0] if speaker_embs is not None else True
 
         if self.speaker_cond is False:
@@ -333,6 +334,7 @@ class Model:
                         except Exception as e:
                             print("failed to run MBD.")
                             print(f"reason: {str(e)}")
+                            traceback.print_exc()
                             to_return.append(None)
 
                 return to_return
@@ -467,6 +469,8 @@ def _sample_utterance_batch(
         speaker_embs.append(get_cached_embedding(spk_cond_path, spkemb_model) if spk_cond_path else None)
 
     b_speaker_embs = torch.cat(speaker_embs, dim=0)
+    # TODO: add MPS conditional
+    b_speaker_embs = b_speaker_embs.to("mps")
 
     start = time.time()
     b_tokens = first_stage_model(

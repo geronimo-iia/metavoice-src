@@ -9,7 +9,12 @@ import torch
 from audiocraft.data.audio import audio_read, audio_write
 from audiocraft.models import MultiBandDiffusion  # type: ignore
 
-mbd = MultiBandDiffusion.get_mbd_24khz(bw=6)  # 1.5
+MBD_SAMPLE_RATE = 24_000
+END_OF_AUDIO_TOKEN = 1024
+NUM_CODEBOOKS = 8
+
+_device = "cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu"
+_mbd = MultiBandDiffusion.get_mbd_24khz(bw=6, device = _device )  # 1.5
 
 
 class Decoder(ABC):
@@ -25,14 +30,8 @@ class EncodecDecoder(Decoder):
         data_adapter_fn: Callable[[list[list[int]]], tuple[list[int], list[list[int]]]],
         output_dir: str,
     ):
-        self._mbd_sample_rate = 24_000
-        self._end_of_audio_token = 1024
-        self._num_codebooks = 8
-        self.mbd = mbd
-
         self.tokeniser_decode_fn = tokeniser_decode_fn
         self._data_adapter_fn = data_adapter_fn
-
         self.output_dir = pathlib.Path(output_dir).resolve()
         os.makedirs(self.output_dir, exist_ok=True)
 
@@ -40,7 +39,7 @@ class EncodecDecoder(Decoder):
         audio_write(
             name,
             wav.squeeze(0).cpu(),
-            self._mbd_sample_rate,
+            MBD_SAMPLE_RATE,
             strategy="loudness",
             loudness_compressor=True,
         )
@@ -52,12 +51,12 @@ class EncodecDecoder(Decoder):
         """
         pass
         wav, sr = audio_read(audio_path)
-        if sr != self._mbd_sample_rate:
-            wav = julius.resample_frac(wav, sr, self._mbd_sample_rate)
+        if sr != MBD_SAMPLE_RATE:
+            wav = julius.resample_frac(wav, sr, MBD_SAMPLE_RATE)
         if wav.ndim == 2:
             wav = wav.unsqueeze(1)
-        wav = wav.to("cuda")
-        tokens = self.mbd.codec_model.encode(wav)
+        wav = wav.to(_device)
+        tokens = _mbd.codec_model.encode(wav)
         tokens = tokens[0][0]
 
         return tokens.tolist()
@@ -70,18 +69,21 @@ class EncodecDecoder(Decoder):
         text = self.tokeniser_decode_fn(text_ids)
         # print(f"Text: {text}")
 
-        tokens = torch.tensor(extracted_audio_ids, device="cuda").unsqueeze(0)
+        tokens = torch.tensor(extracted_audio_ids, device=_device).unsqueeze(0)
 
-        if tokens.shape[1] < self._num_codebooks:
+        if tokens.shape[1] < NUM_CODEBOOKS:
             tokens = torch.cat(
-                [tokens, *[torch.ones_like(tokens[0:1, 0:1]) * 0] * (self._num_codebooks - tokens.shape[1])], dim=1
+                [tokens, *[torch.ones_like(tokens[0:1, 0:1]) * 0] * (NUM_CODEBOOKS - tokens.shape[1])], dim=1
             )
 
         if causal:
             return tokens
         else:
-            with torch.amp.autocast(device_type="cuda", dtype=torch.float32):
-                wav = self.mbd.tokens_to_wav(tokens)
+            with torch.amp.autocast(
+                device_type="cpu" if _device != "cuda" else _device,
+                dtype=torch.bfloat16 if _device != "cuda" else torch.float32,
+            ):
+                wav = _mbd.tokens_to_wav(tokens)
             # NOTE: we couldn't just return wav here as it goes through loudness compression etc :)
 
         if wav.shape[-1] < 9600:

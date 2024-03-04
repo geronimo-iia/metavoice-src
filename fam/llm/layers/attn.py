@@ -137,7 +137,7 @@ class SelfAttention(nn.Module):
         # if kv-caching and causal, for the "prefill" stage, we need to use a causal mask, and
         # use no mask for the "one time step" parts.
         # calculate this before updating kv_caching so we have the right value for kv_cache_first_empty_index
-        is_causal_attn_mask = self.causal and (not self.kv_cache_enabled or self.kv_cache_first_empty_index == 0)
+        is_causal = self.causal and (not self.kv_cache_enabled or self.kv_cache_first_empty_index == 0)
 
         if self.kv_cache_enabled:
             k, v = self._update_kv_cache(q, k, v)
@@ -151,10 +151,43 @@ class SelfAttention(nn.Module):
             v,
             attn_mask=None,
             dropout_p=self.dropout if self.training else 0,
-            is_causal=is_causal_attn_mask,
+            is_causal=is_causal,
         ).transpose(
             1, 2
         )  # (B, nh, T, hs) -> (B, T, nh, hs)
+
+        return y
+
+    def _vanilla_attn(self, c_x: torch.Tensor) -> torch.Tensor:
+        """
+        Performs vanilla attention.
+
+        Args:
+            c_x: The input tensor.
+
+        Returns:
+            The output tensor.
+        """
+        q, k, v = c_x.split(1, dim=2)  # q, k, v of shape (B, T, nh, hs)
+        q = q.squeeze(2)  # (B, T, nh, hs)
+        k = k.squeeze(2)  # (B, T, nh, hs)
+        v = v.squeeze(2)  # (B, T, nh, hs)
+
+        if self.kv_cache_enabled:
+            k, v = self._update_kv_cache(q, k, v)
+
+        q = q.transpose(1, 2)  # (B, nh, T, hs)
+        k = k.transpose(1, 2)  # (B, nh, T, hs)
+        v = v.transpose(1, 2)  # (B, nh, T, hs)
+        att = q @ k.transpose(-2, -1) * (1.0 / math.sqrt(k.size(-1)))  # (B, nh, T, T)
+        if self.causal and (not self.kv_cache_enabled or self.kv_cache_first_empty_index == 0):
+            att = att.masked_fill(
+                torch.triu(torch.ones_like(att, dtype=torch.bool), diagonal=1), float("-inf")
+            )  # (B, nh, T, T)
+        att = F.softmax(att, dim=-1)  # (B, nh, T, T)
+        att = self.attn_dropout(att)  # (B, nh, T, T)
+        y = att @ v  # (B, nh, T, hs)
+        y = y.transpose(1, 2)  # (B, T, nh, hs)
 
         return y
 
